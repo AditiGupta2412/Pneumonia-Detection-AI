@@ -33,7 +33,7 @@ Installation
 
 Clone the repository:
 
-git clone https://github.com/your-username/pneumonia-detection-ai.git
+git clone [https://github.com/your-username/pneumonia-detection-ai.git](https://github.com/AditiGupta2412/Pneumonia-Detection-AI)
 
 Go to project folder:
 
@@ -70,6 +70,6 @@ Model optimization
 Deploy on Render / Hugging Face / Streamlit
 Add Grad-CAM visualization
 Multi-disease detection
-Author
 
+Author
 Aditi Gupta
