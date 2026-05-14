@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Pneumonia Detection AI</title>
+
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+
+    <div class="container">
+
+        <h1>Pneumonia Detection AI</h1>
+
+        <p>Upload a Chest X-ray Image for Prediction</p>
+
+        <form id="upload-form" enctype="multipart/form-data">
+
+            <input
+                type="file"
+                id="file-input"
+                name="file"
+                accept="image/*"
+                required
+            >
+
+            <br>
+
+            <button type="submit">
+                Predict
+            </button>
+
+        </form>
+
+        <div class="loading" id="loading">
+            Processing Image...
+        </div>
+
+        <div class="preview">
+
+            <img
+                id="preview-image"
+                src=""
+                style="display:none;"
+            >
+
+        </div>
+
+        <div
+            class="result"
+            id="result"
+            style="display:none;"
+        >
+
+            <div
+                class="prediction"
+                id="prediction-text"
+            ></div>
+
+            <div
+                class="confidence"
+                id="confidence-text"
+            ></div>
+
+        </div>
+
+    </div>
+
+    <script>
+
+        const form = document.getElementById('upload-form');
+        const fileInput = document.getElementById('file-input');
+        const previewImage = document.getElementById('preview-image');
+
+        const resultBox = document.getElementById('result');
+        const predictionText = document.getElementById('prediction-text');
+        const confidenceText = document.getElementById('confidence-text');
+
+        const loading = document.getElementById('loading');
+
+        // IMAGE PREVIEW
+
+        fileInput.addEventListener('change', function () {
+
+            const file = this.files[0];
+
+            if (file) {
+
+                const reader = new FileReader();
+
+                reader.onload = function (e) {
+
+                    previewImage.src = e.target.result;
+
+                    previewImage.style.display = 'block';
+
+                }
+
+                reader.readAsDataURL(file);
+
+            }
+
+        });
+
+        // FORM SUBMIT
+
+        form.addEventListener('submit', async function (e) {
+
+            e.preventDefault();
+
+            const file = fileInput.files[0];
+
+            if (!file) {
+
+                alert("Please select an image.");
+
+                return;
+
+            }
+
+            const formData = new FormData();
+
+            formData.append('file', file);
+
+            loading.style.display = 'block';
+
+            resultBox.style.display = 'none';
+
+            try {
+
+                const response = await fetch('/predict', {
+
+                    method: 'POST',
+
+                    body: formData
+
+                });
+
+                const data = await response.json();
+
+                loading.style.display = 'none';
+
+                resultBox.style.display = 'block';
+
+                if (data.error) {
+
+                    predictionText.innerHTML = "Error";
+
+                    confidenceText.innerHTML = data.error;
+
+                }
+
+                else {
+
+                    predictionText.innerHTML = data.prediction;
+
+                    confidenceText.innerHTML =
+                        "Confidence: " + data.confidence + "%";
+
+                }
+
+            }
+
+            catch (error) {
+
+                loading.style.display = 'none';
+
+                resultBox.style.display = 'block';
+
+                predictionText.innerHTML = "Error";
+
+                confidenceText.innerHTML =
+                    "Failed to connect with server.";
+
+            }
+
+        });
+
+    </script>
+
+</body>
+
+</html>
