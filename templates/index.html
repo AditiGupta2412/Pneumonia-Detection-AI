@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#f4f7fb">
+    <title>Pneumonia Detection AI</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <main class="app-shell">
+        <header class="page-header">
+            <span class="eyebrow">CHEST X-RAY · RESEARCH DEMO</span>
+            <h1>Pneumonia Detection</h1>
+            <p class="intro">Upload a chest X-ray to see the prediction from the project's trained model.</p>
+        </header>
+
+        <section class="workspace" aria-label="X-ray prediction">
+            <form id="upload-form" class="upload-panel" enctype="multipart/form-data">
+                <label class="upload-label" for="file-input">Choose a chest X-ray</label>
+                <p class="helper-text">PNG or JPEG · Maximum file size 10 MB</p>
+                <input type="file" id="file-input" name="file" accept="image/png,image/jpeg" required>
+
+                <div class="preview" id="preview" hidden>
+                    <img id="preview-image" alt="Preview of the selected chest X-ray">
+                    <p id="file-name" class="file-name"></p>
+                </div>
+
+                <button type="submit" id="submit-button" disabled>Analyze image</button>
+                <p class="loading" id="loading" role="status" hidden>Analyzing image…</p>
+                <p class="error-message" id="error-message" role="alert" hidden></p>
+            </form>
+
+            <section class="result-panel" id="result" aria-live="polite" hidden>
+                <span class="eyebrow">MODEL OUTPUT</span>
+                <h2 id="prediction-text"></h2>
+                <p class="score-line">Prediction confidence <strong id="score-text"></strong></p>
+                <p class="helper-text">This score is the model's output, not a calibrated measure of diagnostic certainty.</p>
+                <button type="button" class="secondary-button" id="explain-button">Generate Explanation</button>
+                <button type="button" class="secondary-button report-button" id="report-button">Download PDF report</button>
+                <p class="loading explanation-status" id="explanation-loading" role="status" hidden>Generating Grad-CAM explanation…</p>
+                <p class="error-message explanation-status" id="explanation-error" role="alert" hidden></p>
+                <p class="loading report-status" id="report-loading" role="status" hidden>Generating PDF report…</p>
+                <p class="error-message report-status" id="report-error" role="alert" hidden></p>
+            </section>
+        </section>
+
+        <section class="explanation-panel" id="explanation" aria-live="polite" hidden>
+            <div class="explanation-heading">
+                <div>
+                    <span class="eyebrow">VISUAL EXPLANATION</span>
+                    <h2>Model Explainability</h2>
+                </div>
+                <span class="layer-label" id="layer-label"></span>
+            </div>
+            <p class="explanation-note">
+                Grad-CAM shows relative image regions that influenced the selected prediction. Warm colors indicate
+                stronger relative response in this map; they are not probabilities, lesion boundaries, or a diagnosis.
+                The map is coarse and may highlight irrelevant image features.
+            </p>
+            <p class="explanation-target" id="explanation-target"></p>
+            <div class="explanation-grid">
+                <figure>
+                    <img id="original-explanation-image" alt="Original chest X-ray">
+                    <figcaption>Original X-ray</figcaption>
+                </figure>
+                <figure>
+                    <img id="heatmap-image" alt="Raw grayscale Grad-CAM generated from model gradients">
+                    <figcaption>Raw Grad-CAM</figcaption>
+                </figure>
+                <figure>
+                    <img id="overlay-image" alt="Grad-CAM heatmap overlaid on the chest X-ray">
+                    <figcaption>Overlay</figcaption>
+                </figure>
+            </div>
+        </section>
+
+        <aside class="notice">
+            <strong>Research use only.</strong> This demo is not a medical device and must not be used to diagnose,
+            treat, or rule out pneumonia. Please consult a qualified healthcare professional for medical advice.
+        </aside>
+    </main>
+
+    <script>
+        const form = document.getElementById('upload-form');
+        const fileInput = document.getElementById('file-input');
+        const preview = document.getElementById('preview');
+        const previewImage = document.getElementById('preview-image');
+        const fileName = document.getElementById('file-name');
+        const submitButton = document.getElementById('submit-button');
+        const result = document.getElementById('result');
+        const predictionText = document.getElementById('prediction-text');
+        const scoreText = document.getElementById('score-text');
+        const explainButton = document.getElementById('explain-button');
+        const reportButton = document.getElementById('report-button');
+        const reportLoading = document.getElementById('report-loading');
+        const reportError = document.getElementById('report-error');
+        const explanation = document.getElementById('explanation');
+        const originalExplanationImage = document.getElementById('original-explanation-image');
+        const heatmapImage = document.getElementById('heatmap-image');
+        const overlayImage = document.getElementById('overlay-image');
+        const layerLabel = document.getElementById('layer-label');
+        const explanationTarget = document.getElementById('explanation-target');
+        const explanationError = document.getElementById('explanation-error');
+        const explanationLoading = document.getElementById('explanation-loading');
+        const loading = document.getElementById('loading');
+        const errorMessage = document.getElementById('error-message');
+        let previewUrl;
+
+        fileInput.addEventListener('change', () => {
+            const file = fileInput.files[0];
+            result.hidden = true;
+            explanation.hidden = true;
+            errorMessage.hidden = true;
+            explanationError.hidden = true;
+            explanationLoading.hidden = true;
+            reportLoading.hidden = true;
+            reportError.hidden = true;
+            submitButton.disabled = true;
+
+            if (previewUrl) {
+                URL.revokeObjectURL(previewUrl);
+                previewUrl = undefined;
+            }
+
+            if (!file) {
+                preview.hidden = true;
+                return;
+            }
+
+            if (!['image/jpeg', 'image/png'].includes(file.type)) {
+                errorMessage.textContent = 'Please choose a PNG or JPEG image.';
+                errorMessage.hidden = false;
+                preview.hidden = true;
+                return;
+            }
+
+            if (file.size > 10 * 1024 * 1024) {
+                errorMessage.textContent = 'Image is too large. Please choose a file under 10 MB.';
+                errorMessage.hidden = false;
+                preview.hidden = true;
+                return;
+            }
+
+            previewUrl = URL.createObjectURL(file);
+            previewImage.src = previewUrl;
+            fileName.textContent = file.name;
+            preview.hidden = false;
+            submitButton.disabled = false;
+        });
+
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const file = fileInput.files[0];
+            if (!file || submitButton.disabled) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+            loading.hidden = false;
+            errorMessage.hidden = true;
+            result.hidden = true;
+            explanation.hidden = true;
+            explanationError.hidden = true;
+            explanationLoading.hidden = true;
+            reportLoading.hidden = true;
+            reportError.hidden = true;
+            submitButton.disabled = true;
+
+            try {
+                const response = await fetch('/predict', { method: 'POST', body: formData });
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Prediction failed. Please try again.');
+                }
+
+                predictionText.textContent = data.prediction;
+                scoreText.textContent = `${data.confidence ?? data.score}%`;
+                originalExplanationImage.src = previewUrl;
+                explanation.hidden = true;
+                explainButton.disabled = false;
+                result.hidden = false;
+            } catch (error) {
+                errorMessage.textContent = error.message || 'Could not connect to the server. Please try again.';
+                errorMessage.hidden = false;
+            } finally {
+                loading.hidden = true;
+                submitButton.disabled = false;
+            }
+        });
+
+        explainButton.addEventListener('click', async () => {
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+            explainButton.disabled = true;
+            explanationLoading.hidden = false;
+            explanationError.hidden = true;
+            explanation.hidden = true;
+
+            try {
+                const response = await fetch('/explain', { method: 'POST', body: formData });
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Could not generate the explanation.');
+                }
+
+                heatmapImage.src = data.raw_gradcam;
+                console.info('Grad-CAM diagnostics', data.debug);
+                overlayImage.src = data.overlay;
+                explanationTarget.textContent = `Class-specific explanation for ${data.prediction}.`;
+                layerLabel.textContent = `Final convolution: ${data.target_layer}`;
+                explanation.hidden = false;
+            } catch (error) {
+                explanationError.textContent = error.message || 'Could not generate the explanation. Your prediction is still available.';
+                explanationError.hidden = false;
+            } finally {
+                explanationLoading.hidden = true;
+                explainButton.disabled = false;
+            }
+        });
+
+        reportButton.addEventListener('click', async () => {
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+            reportButton.disabled = true;
+            reportLoading.hidden = false;
+            reportError.hidden = true;
+
+            try {
+                const response = await fetch('/report', { method: 'POST', body: formData });
+                if (!response.ok) {
+                    const data = await response.json();
+                    throw new Error(data.error || 'Could not generate the PDF report.');
+                }
+
+                const pdfUrl = URL.createObjectURL(await response.blob());
+                const downloadLink = document.createElement('a');
+                downloadLink.href = pdfUrl;
+                downloadLink.download = 'chest-xray-analysis-report.pdf';
+                downloadLink.click();
+                URL.revokeObjectURL(pdfUrl);
+            } catch (error) {
+                reportError.textContent = error.message || 'Could not generate the PDF report.';
+                reportError.hidden = false;
+            } finally {
+                reportLoading.hidden = true;
+                reportButton.disabled = false;
+            }
+        });
+    </script>
+    </main>
+</body>
+</html>
