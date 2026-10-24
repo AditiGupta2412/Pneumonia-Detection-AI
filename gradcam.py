@@ -32,6 +32,28 @@ class GradCAMResult:
     heatmap_max: float
 
 
+HIGH_BIT_DEPTH_MODES = {"I", "I;16", "I;16B", "I;16L", "I;16N", "F"}
+
+
+def normalize_to_rgb(image: Image.Image) -> Image.Image:
+    """Apply EXIF orientation and convert to 8-bit RGB.
+
+    Pillow clips 16-bit and 32-bit pixel values to 255 when converting to RGB,
+    which turns most high-bit-depth X-rays white, so those are min-max scaled to
+    8-bit first.
+    """
+    image = ImageOps.exif_transpose(image)
+    if image.mode in HIGH_BIT_DEPTH_MODES:
+        values = np.asarray(image, dtype=np.float64)
+        low, high = float(values.min()), float(values.max())
+        if high > low:
+            values = (values - low) / (high - low) * 255.0
+        else:
+            values = np.zeros_like(values)
+        image = Image.fromarray(np.uint8(np.round(values)), mode="L")
+    return image.convert("RGB")
+
+
 def preprocess_image(image: Image.Image) -> np.ndarray:
     """Apply the same RGB, 150x150, [0, 1] preprocessing as app inference."""
     resized = image.convert("RGB").resize((150, 150))

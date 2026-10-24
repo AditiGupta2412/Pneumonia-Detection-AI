@@ -13,9 +13,12 @@ from PIL import Image
 from gradcam import (
     GradCAMExplainer,
     generate_raw_heatmap,
+    normalize_to_rgb,
     overlay_heatmap,
     preprocess_image,
 )
+
+PROJECT_DIR = Path(__file__).resolve().parent
 
 
 def _model_hashes(model_dir: Path) -> dict[str, str]:
@@ -34,10 +37,10 @@ def main() -> None:
     parser.add_argument(
         "--model-dir",
         type=Path,
-        default=Path("saved_pneumonia_model"),
+        default=PROJECT_DIR / "saved_pneumonia_model",
     )
     parser.add_argument("--image", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, default=Path("gradcam_output"))
+    parser.add_argument("--output-dir", type=Path, default=PROJECT_DIR / "gradcam_output")
     args = parser.parse_args()
 
     model_dir = args.model_dir.resolve()
@@ -55,7 +58,7 @@ def main() -> None:
         raise RuntimeError("SavedModel serving_default signature did not load.")
 
     with Image.open(image_path) as source:
-        original = source.convert("RGB")
+        original = normalize_to_rgb(source)
     batch = preprocess_image(original)
 
     input_name = next(iter(signature.structured_input_signature[1]))

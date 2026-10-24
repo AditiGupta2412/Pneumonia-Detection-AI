@@ -106,8 +106,27 @@
         const loading = document.getElementById('loading');
         const errorMessage = document.getElementById('error-message');
         let previewUrl;
+        // Incremented on every file change so responses for an earlier file are ignored.
+        let selectionId = 0;
+
+        async function readJson(response) {
+            try {
+                return await response.json();
+            } catch {
+                return {};
+            }
+        }
+
+        function errorText(error, fallback) {
+            // fetch() rejects with a TypeError when the server cannot be reached.
+            if (error instanceof TypeError) {
+                return 'Could not connect to the server. Please try again.';
+            }
+            return error.message || fallback;
+        }
 
         fileInput.addEventListener('change', () => {
+            selectionId += 1;
             const file = fileInput.files[0];
             result.hidden = true;
             explanation.hidden = true;
@@ -154,6 +173,7 @@
             const file = fileInput.files[0];
             if (!file || submitButton.disabled) return;
 
+            const requestId = selectionId;
             const formData = new FormData();
             formData.append('file', file);
             loading.hidden = false;
@@ -168,9 +188,10 @@
 
             try {
                 const response = await fetch('/predict', { method: 'POST', body: formData });
-                const data = await response.json();
+                const data = await readJson(response);
+                if (requestId !== selectionId) return;
 
-                if (!response.ok) {
+                if (!response.ok || !data.prediction) {
                     throw new Error(data.error || 'Prediction failed. Please try again.');
                 }
 
@@ -181,11 +202,14 @@
                 explainButton.disabled = false;
                 result.hidden = false;
             } catch (error) {
-                errorMessage.textContent = error.message || 'Could not connect to the server. Please try again.';
+                if (requestId !== selectionId) return;
+                errorMessage.textContent = errorText(error, 'Prediction failed. Please try again.');
                 errorMessage.hidden = false;
             } finally {
-                loading.hidden = true;
-                submitButton.disabled = false;
+                if (requestId === selectionId) {
+                    loading.hidden = true;
+                    submitButton.disabled = false;
+                }
             }
         });
 
@@ -193,6 +217,7 @@
             const file = fileInput.files[0];
             if (!file) return;
 
+            const requestId = selectionId;
             const formData = new FormData();
             formData.append('file', file);
             explainButton.disabled = true;
@@ -202,9 +227,10 @@
 
             try {
                 const response = await fetch('/explain', { method: 'POST', body: formData });
-                const data = await response.json();
+                const data = await readJson(response);
+                if (requestId !== selectionId) return;
 
-                if (!response.ok) {
+                if (!response.ok || !data.overlay) {
                     throw new Error(data.error || 'Could not generate the explanation.');
                 }
 
@@ -215,11 +241,14 @@
                 layerLabel.textContent = `Final convolution: ${data.target_layer}`;
                 explanation.hidden = false;
             } catch (error) {
-                explanationError.textContent = error.message || 'Could not generate the explanation. Your prediction is still available.';
+                if (requestId !== selectionId) return;
+                explanationError.textContent = errorText(error, 'Could not generate the explanation. Your prediction is still available.');
                 explanationError.hidden = false;
             } finally {
-                explanationLoading.hidden = true;
                 explainButton.disabled = false;
+                if (requestId === selectionId) {
+                    explanationLoading.hidden = true;
+                }
             }
         });
 
@@ -227,6 +256,7 @@
             const file = fileInput.files[0];
             if (!file) return;
 
+            const requestId = selectionId;
             const formData = new FormData();
             formData.append('file', file);
             reportButton.disabled = true;
@@ -236,25 +266,31 @@
             try {
                 const response = await fetch('/report', { method: 'POST', body: formData });
                 if (!response.ok) {
-                    const data = await response.json();
+                    const data = await readJson(response);
                     throw new Error(data.error || 'Could not generate the PDF report.');
                 }
 
-                const pdfUrl = URL.createObjectURL(await response.blob());
+                const pdfBlob = await response.blob();
+                if (requestId !== selectionId) return;
+
+                const pdfUrl = URL.createObjectURL(pdfBlob);
                 const downloadLink = document.createElement('a');
                 downloadLink.href = pdfUrl;
                 downloadLink.download = 'chest-xray-analysis-report.pdf';
                 downloadLink.click();
-                URL.revokeObjectURL(pdfUrl);
+                // Revoking synchronously can cancel the download in some browsers.
+                setTimeout(() => URL.revokeObjectURL(pdfUrl), 1000);
             } catch (error) {
-                reportError.textContent = error.message || 'Could not generate the PDF report.';
+                if (requestId !== selectionId) return;
+                reportError.textContent = errorText(error, 'Could not generate the PDF report.');
                 reportError.hidden = false;
             } finally {
-                reportLoading.hidden = true;
                 reportButton.disabled = false;
+                if (requestId === selectionId) {
+                    reportLoading.hidden = true;
+                }
             }
         });
     </script>
-    </main>
 </body>
 </html>

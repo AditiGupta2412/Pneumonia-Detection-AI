@@ -1,5 +1,7 @@
+import os
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 
 from flask import Flask, render_template, request, jsonify, send_file
 from PIL import Image
@@ -23,24 +25,38 @@ from gradcam import (
     GradCAMExplainer,
     generate_raw_heatmap,
     image_to_data_url,
+    normalize_to_rgb,
     overlay_heatmap,
     preprocess_image,
 )
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
-MODEL_PATH = "saved_pneumonia_model"
+MODEL_PATH = Path(__file__).resolve().parent / "saved_pneumonia_model"
+ALLOWED_IMAGE_FORMATS = {"PNG", "JPEG"}
+# Large chest X-rays are around 4300x4300 (18.5M pixels).
+MAX_IMAGE_PIXELS = 50_000_000
+INVALID_IMAGE_MESSAGE = 'The uploaded file is not a valid image. Please try a PNG or JPEG X-ray.'
+
+
+class InvalidImageError(ValueError):
+    """Raised when an upload is not an image the app can analyze."""
+
+    def __init__(self, message=INVALID_IMAGE_MESSAGE):
+        super().__init__(message)
+
 
 try:
     print(" Loading Pneumonia Detection Model...")
 
-    model = tf.saved_model.load(MODEL_PATH)
+    model = tf.saved_model.load(str(MODEL_PATH))
 
     print(" Model loaded successfully!")
     print(" AI System Ready!\n")
 
 except Exception as e:
-    print(f"❌ Error loading model: {e}")
+    # Plain ASCII: an emoji here crashes on Windows consoles that use cp1252.
+    print(f" Error loading model: {e}")
     model = None
 
 gradcam_explainer = None
@@ -54,12 +70,26 @@ if model is not None:
 
 
 def _read_uploaded_image(file):
-    with Image.open(file.stream) as uploaded_image:
-        uploaded_image.verify()
+    try:
+        with Image.open(file.stream) as uploaded_image:
+            if uploaded_image.format not in ALLOWED_IMAGE_FORMATS:
+                raise InvalidImageError('Unsupported image format. Please upload a PNG or JPEG X-ray.')
+            width, height = uploaded_image.size
+            if width * height > MAX_IMAGE_PIXELS:
+                raise InvalidImageError('Image dimensions are too large. Please upload a smaller X-ray.')
+            uploaded_image.verify()
 
-    file.stream.seek(0)
-    with Image.open(file.stream) as uploaded_image:
-        image = uploaded_image.convert('RGB')
+        file.stream.seek(0)
+        with Image.open(file.stream) as uploaded_image:
+            image = normalize_to_rgb(uploaded_image)
+
+    except InvalidImageError:
+        raise
+    except Image.DecompressionBombError as error:
+        raise InvalidImageError('Image dimensions are too large. Please upload a smaller X-ray.') from error
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as error:
+        # Pillow reports corrupt files with any of these exception types.
+        raise InvalidImageError() from error
 
     return image, preprocess_image(image)
 
@@ -124,10 +154,8 @@ def predict():
             'score': confidence
         })
 
-    except (UnidentifiedImageError, OSError, ValueError):
-        return jsonify({
-            'error': 'The uploaded file is not a valid image. Please try a PNG or JPEG X-ray.'
-        }), 400
+    except InvalidImageError as error:
+        return jsonify({'error': str(error)}), 400
 
     except Exception:
         app.logger.exception("Prediction failed")
@@ -198,10 +226,8 @@ def explain():
             }
         })
 
-    except (UnidentifiedImageError, OSError, ValueError):
-        return jsonify({
-            'error': 'The uploaded file is not a valid image. Please try a PNG or JPEG X-ray.'
-        }), 400
+    except InvalidImageError as error:
+        return jsonify({'error': str(error)}), 400
 
     except Exception:
         app.logger.exception("Grad-CAM generation failed")
@@ -236,7 +262,7 @@ def report():
         original_buffer = BytesIO()
         heatmap_buffer = BytesIO()
         overlay_buffer = BytesIO()
-        original_image.save(original_buffer, format='PNG')
+        display_image.save(original_buffer, format='PNG')
         raw_heatmap.save(heatmap_buffer, format='PNG')
         overlay.save(overlay_buffer, format='PNG')
         original_buffer.seek(0)
@@ -385,10 +411,8 @@ def report():
             download_name='chest-xray-analysis-report.pdf',
         )
 
-    except (UnidentifiedImageError, OSError, ValueError):
-        return jsonify({
-            'error': 'The uploaded file is not a valid image. Please try a PNG or JPEG X-ray.'
-        }), 400
+    except InvalidImageError as error:
+        return jsonify({'error': str(error)}), 400
 
     except Exception:
         app.logger.exception("PDF report generation failed")
@@ -398,4 +422,5 @@ def report():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    # The Werkzeug debugger allows running code, so it is opt-in: FLASK_DEBUG=1.
+    app.run(debug=os.environ.get('FLASK_DEBUG') == '1', port=5000)

@@ -6,7 +6,8 @@ Features
 Upload Chest X-ray images
 Predict Pneumonia or Normal
 Model score display (not calibrated confidence)
-PNG and JPEG upload validation with a 10 MB limit
+PNG and JPEG upload validation (checked in the browser and on the server) with a 10 MB limit
+16-bit grayscale PNG support (scaled to 8-bit before prediction)
 Chest X-ray preview before prediction
 Optional Grad-CAM heatmap and overlay using the existing trained model
 Flask web application
@@ -44,13 +45,20 @@ Go to project folder:
 
 cd pneumonia-detection-ai
 
-Install dependencies:
+Create a virtual environment (Python 3.10–3.13) and install the pinned dependencies:
 
+python -m venv .venv
+.venv\Scripts\activate        (Windows)
+source .venv/bin/activate     (macOS / Linux)
 pip install -r requirements.txt
 
 Run the application:
 
 python app.py
+
+The app finds the model relative to app.py, so it can be started from any folder.
+Debug mode is off by default; set FLASK_DEBUG=1 to enable it for local development only.
+On Windows with Smart App Control on, TensorFlow's DLLs are blocked and the app cannot start.
 Usage
 Open browser
 Go to:
@@ -71,7 +79,8 @@ generates `original_xray.png`, `raw_gradcam.png`, and `gradcam_overlay.png`
 inside `gradcam_output/`, prints Grad-CAM diagnostics, and checks that the
 SavedModel files are unchanged. The repository does not include training code
 or training preprocessing/class-index metadata; the current inference preprocessing
-(RGB, resize to 150x150, divide by 255) is shared by prediction and Grad-CAM.
+(EXIF orientation, 16-bit images min-max scaled to 8-bit, RGB, resize to 150x150,
+divide by 255) is shared by prediction and Grad-CAM.
 The exported model accepts one sigmoid probability; the existing app interprets
 values above 0.5 as PNEUMONIA. Grad-CAM is computed against the class-specific
 logit (the pneumonia logit, or its negation for NORMAL) at the final convolution.
