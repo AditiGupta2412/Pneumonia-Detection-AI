@@ -82,6 +82,11 @@
     </main>
 
     <script>
+        // Page flow: choose a file -> preview -> "Analyze image" (POST /predict)
+        // -> optional "Generate Explanation" (POST /explain) and
+        // "Download PDF report" (POST /report). Each request re-sends the file.
+
+        // References to the page elements used below.
         const form = document.getElementById('upload-form');
         const fileInput = document.getElementById('file-input');
         const preview = document.getElementById('preview');
@@ -105,9 +110,34 @@
         const explanationLoading = document.getElementById('explanation-loading');
         const loading = document.getElementById('loading');
         const errorMessage = document.getElementById('error-message');
+        // Temporary browser URL for the selected file, used by the preview.
         let previewUrl;
+        // Incremented on every file change so responses for an earlier file are ignored.
+        let selectionId = 0;
 
+        // Parse a JSON response, or return {} if the body is not JSON
+        // (for example an HTML error page from a proxy).
+        async function readJson(response) {
+            try {
+                return await response.json();
+            } catch {
+                return {};
+            }
+        }
+
+        // Choose the message to show for a failed request.
+        function errorText(error, fallback) {
+            // fetch() rejects with a TypeError when the server cannot be reached.
+            if (error instanceof TypeError) {
+                return 'Could not connect to the server. Please try again.';
+            }
+            return error.message || fallback;
+        }
+
+        // A new file was chosen: clear old results, check the file in the
+        // browser and show the preview. The server checks the file again.
         fileInput.addEventListener('change', () => {
+            selectionId += 1;
             const file = fileInput.files[0];
             result.hidden = true;
             explanation.hidden = true;
@@ -118,6 +148,7 @@
             reportError.hidden = true;
             submitButton.disabled = true;
 
+            // Free the previous preview's memory.
             if (previewUrl) {
                 URL.revokeObjectURL(previewUrl);
                 previewUrl = undefined;
@@ -128,6 +159,8 @@
                 return;
             }
 
+            // Quick checks in the browser give instant feedback; the same
+            // limits are enforced again by the server.
             if (!['image/jpeg', 'image/png'].includes(file.type)) {
                 errorMessage.textContent = 'Please choose a PNG or JPEG image.';
                 errorMessage.hidden = false;
@@ -149,11 +182,15 @@
             submitButton.disabled = false;
         });
 
+        // "Analyze image": send the file to /predict and show the class and score.
         form.addEventListener('submit', async (event) => {
+            // Stop the browser's normal form submission (a full page reload).
             event.preventDefault();
             const file = fileInput.files[0];
             if (!file || submitButton.disabled) return;
 
+            // Remember which file this request is for (see selectionId).
+            const requestId = selectionId;
             const formData = new FormData();
             formData.append('file', file);
             loading.hidden = false;
@@ -168,9 +205,11 @@
 
             try {
                 const response = await fetch('/predict', { method: 'POST', body: formData });
-                const data = await response.json();
+                const data = await readJson(response);
+                // The user picked another file while waiting: drop this result.
+                if (requestId !== selectionId) return;
 
-                if (!response.ok) {
+                if (!response.ok || !data.prediction) {
                     throw new Error(data.error || 'Prediction failed. Please try again.');
                 }
 
@@ -181,18 +220,24 @@
                 explainButton.disabled = false;
                 result.hidden = false;
             } catch (error) {
-                errorMessage.textContent = error.message || 'Could not connect to the server. Please try again.';
+                if (requestId !== selectionId) return;
+                errorMessage.textContent = errorText(error, 'Prediction failed. Please try again.');
                 errorMessage.hidden = false;
             } finally {
-                loading.hidden = true;
-                submitButton.disabled = false;
+                if (requestId === selectionId) {
+                    loading.hidden = true;
+                    submitButton.disabled = false;
+                }
             }
         });
 
+        // "Generate Explanation": send the file to /explain and show the
+        // raw Grad-CAM map and the overlay next to the original X-ray.
         explainButton.addEventListener('click', async () => {
             const file = fileInput.files[0];
             if (!file) return;
 
+            const requestId = selectionId;
             const formData = new FormData();
             formData.append('file', file);
             explainButton.disabled = true;
@@ -202,31 +247,39 @@
 
             try {
                 const response = await fetch('/explain', { method: 'POST', body: formData });
-                const data = await response.json();
+                const data = await readJson(response);
+                if (requestId !== selectionId) return;
 
-                if (!response.ok) {
+                if (!response.ok || !data.overlay) {
                     throw new Error(data.error || 'Could not generate the explanation.');
                 }
 
+                // The images arrive as data URLs and can be shown directly.
                 heatmapImage.src = data.raw_gradcam;
+                // Technical details for developers, visible in the browser console.
                 console.info('Grad-CAM diagnostics', data.debug);
                 overlayImage.src = data.overlay;
                 explanationTarget.textContent = `Class-specific explanation for ${data.prediction}.`;
                 layerLabel.textContent = `Final convolution: ${data.target_layer}`;
                 explanation.hidden = false;
             } catch (error) {
-                explanationError.textContent = error.message || 'Could not generate the explanation. Your prediction is still available.';
+                if (requestId !== selectionId) return;
+                explanationError.textContent = errorText(error, 'Could not generate the explanation. Your prediction is still available.');
                 explanationError.hidden = false;
             } finally {
-                explanationLoading.hidden = true;
                 explainButton.disabled = false;
+                if (requestId === selectionId) {
+                    explanationLoading.hidden = true;
+                }
             }
         });
 
+        // "Download PDF report": send the file to /report and save the PDF.
         reportButton.addEventListener('click', async () => {
             const file = fileInput.files[0];
             if (!file) return;
 
+            const requestId = selectionId;
             const formData = new FormData();
             formData.append('file', file);
             reportButton.disabled = true;
@@ -236,25 +289,32 @@
             try {
                 const response = await fetch('/report', { method: 'POST', body: formData });
                 if (!response.ok) {
-                    const data = await response.json();
+                    const data = await readJson(response);
                     throw new Error(data.error || 'Could not generate the PDF report.');
                 }
 
-                const pdfUrl = URL.createObjectURL(await response.blob());
+                const pdfBlob = await response.blob();
+                if (requestId !== selectionId) return;
+
+                // Trigger the download through a temporary, invisible link.
+                const pdfUrl = URL.createObjectURL(pdfBlob);
                 const downloadLink = document.createElement('a');
                 downloadLink.href = pdfUrl;
                 downloadLink.download = 'chest-xray-analysis-report.pdf';
                 downloadLink.click();
-                URL.revokeObjectURL(pdfUrl);
+                // Revoking synchronously can cancel the download in some browsers.
+                setTimeout(() => URL.revokeObjectURL(pdfUrl), 1000);
             } catch (error) {
-                reportError.textContent = error.message || 'Could not generate the PDF report.';
+                if (requestId !== selectionId) return;
+                reportError.textContent = errorText(error, 'Could not generate the PDF report.');
                 reportError.hidden = false;
             } finally {
-                reportLoading.hidden = true;
                 reportButton.disabled = false;
+                if (requestId === selectionId) {
+                    reportLoading.hidden = true;
+                }
             }
         });
     </script>
-    </main>
 </body>
 </html>

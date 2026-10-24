@@ -1,5 +1,20 @@
+"""Flask web application for the Pneumonia Detection AI research demo.
+
+Routes:
+    GET  /         the single-page interface (templates/index.html)
+    POST /predict  classify an uploaded chest X-ray as NORMAL or PNEUMONIA
+    POST /explain  return a Grad-CAM heat-map and overlay for the prediction
+    POST /report   return a PDF report with the prediction and Grad-CAM images
+
+Every POST route receives the image in the form field "file", processes it in
+memory and stores nothing on the server. Errors are returned as JSON objects
+with an "error" field that the web page shows to the user.
+"""
+
+import os
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 
 from flask import Flask, render_template, request, jsonify, send_file
 from PIL import Image
@@ -23,26 +38,48 @@ from gradcam import (
     GradCAMExplainer,
     generate_raw_heatmap,
     image_to_data_url,
+    normalize_to_rgb,
     overlay_heatmap,
     preprocess_image,
 )
 
 app = Flask(__name__)
+# Flask rejects larger request bodies with HTTP 413 before a route runs.
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
-MODEL_PATH = "saved_pneumonia_model"
+# Resolved from this file's location so the app works from any working folder.
+MODEL_PATH = Path(__file__).resolve().parent / "saved_pneumonia_model"
+# Pillow format names; checked on the server as well as in the browser.
+ALLOWED_IMAGE_FORMATS = {"PNG", "JPEG"}
+# Large chest X-rays are around 4300x4300 (18.5M pixels).
+MAX_IMAGE_PIXELS = 50_000_000
+INVALID_IMAGE_MESSAGE = 'The uploaded file is not a valid image. Please try a PNG or JPEG X-ray.'
 
+
+class InvalidImageError(ValueError):
+    """Raised when an upload is not an image the app can analyze."""
+
+    def __init__(self, message=INVALID_IMAGE_MESSAGE):
+        super().__init__(message)
+
+
+# Load the exported VGG16 SavedModel once at start-up. If loading fails the
+# server still starts, and the routes answer with HTTP 503 instead of crashing.
 try:
     print(" Loading Pneumonia Detection Model...")
 
-    model = tf.saved_model.load(MODEL_PATH)
+    model = tf.saved_model.load(str(MODEL_PATH))
 
     print(" Model loaded successfully!")
     print(" AI System Ready!\n")
 
 except Exception as e:
-    print(f"❌ Error loading model: {e}")
+    # Plain ASCII: an emoji here crashes on Windows consoles that use cp1252.
+    print(f" Error loading model: {e}")
     model = None
 
+# Grad-CAM is optional: the explainer verifies that its rebuilt model matches
+# the SavedModel, and if that check fails only /explain and /report are
+# disabled while /predict keeps working.
 gradcam_explainer = None
 if model is not None:
     try:
@@ -54,12 +91,39 @@ if model is not None:
 
 
 def _read_uploaded_image(file):
-    with Image.open(file.stream) as uploaded_image:
-        uploaded_image.verify()
+    """Validate an uploaded file and prepare it for the model.
 
-    file.stream.seek(0)
-    with Image.open(file.stream) as uploaded_image:
-        image = uploaded_image.convert('RGB')
+    Returns the image as 8-bit RGB (for display and the PDF) and the
+    pre-processed batch of shape (1, 150, 150, 3) for the model. Raises
+    InvalidImageError, which the routes turn into HTTP 400, for any problem
+    with the file itself.
+    """
+    try:
+        # First pass: Image.open only reads the header, so the format and size
+        # are checked before any pixels are decoded. verify() then checks the
+        # file structure for corruption.
+        with Image.open(file.stream) as uploaded_image:
+            if uploaded_image.format not in ALLOWED_IMAGE_FORMATS:
+                raise InvalidImageError('Unsupported image format. Please upload a PNG or JPEG X-ray.')
+            width, height = uploaded_image.size
+            if width * height > MAX_IMAGE_PIXELS:
+                raise InvalidImageError('Image dimensions are too large. Please upload a smaller X-ray.')
+            uploaded_image.verify()
+
+        # Second pass: an image cannot be used after verify(), so the stream
+        # is rewound and the image opened again to decode the pixels.
+        file.stream.seek(0)
+        with Image.open(file.stream) as uploaded_image:
+            image = normalize_to_rgb(uploaded_image)
+
+    except InvalidImageError:
+        raise
+    except Image.DecompressionBombError as error:
+        # Raised by Pillow for images far beyond MAX_IMAGE_PIXELS.
+        raise InvalidImageError('Image dimensions are too large. Please upload a smaller X-ray.') from error
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as error:
+        # Pillow reports corrupt files with any of these exception types.
+        raise InvalidImageError() from error
 
     return image, preprocess_image(image)
 
@@ -71,11 +135,13 @@ def home():
 
 @app.errorhandler(413)
 def file_too_large(_error):
+    """Return the 10 MB limit error as JSON so the page can display it."""
     return jsonify({'error': 'Image is too large. Please upload an image under 10 MB.'}), 413
 
 
 @app.route('/predict', methods=['POST'])
 def predict():
+    """Classify the uploaded X-ray and return the class and score as JSON."""
 
     # Check model loaded
     if model is None:
@@ -99,6 +165,8 @@ def predict():
 
     try:
         _, img_array = _read_uploaded_image(file)
+        # The SavedModel's serving signature returns a dict holding one
+        # (1, 1) tensor: the sigmoid score for PNEUMONIA.
         infer = model.signatures["serving_default"]
 
         prediction = infer(
@@ -107,6 +175,9 @@ def predict():
 
         output = list(prediction.values())[0]
 
+        # Scores above 0.5 mean PNEUMONIA. For NORMAL the shown value is
+        # 1 - score, so it always describes the predicted class. It is the
+        # model's raw output, not a calibrated probability.
         probability = float(output.numpy()[0][0])
         if probability > 0.5:
 
@@ -124,12 +195,12 @@ def predict():
             'score': confidence
         })
 
-    except (UnidentifiedImageError, OSError, ValueError):
-        return jsonify({
-            'error': 'The uploaded file is not a valid image. Please try a PNG or JPEG X-ray.'
-        }), 400
+    except InvalidImageError as error:
+        # A problem with the uploaded file: the user can fix it.
+        return jsonify({'error': str(error)}), 400
 
     except Exception:
+        # Anything else is a server-side failure, including model errors.
         app.logger.exception("Prediction failed")
 
         return jsonify({
@@ -139,6 +210,10 @@ def predict():
 
 @app.route('/explain', methods=['POST'])
 def explain():
+    """Return the Grad-CAM heat-map and overlay for the uploaded X-ray as JSON.
+
+    The images are sent as PNG data URLs so the page can show them directly.
+    """
     if model is None:
         return jsonify({'error': 'The prediction model is unavailable.'}), 503
 
@@ -155,6 +230,9 @@ def explain():
         original_image, image_array = _read_uploaded_image(file)
         gradcam_result = gradcam_explainer.generate(image_array)
 
+        # The heat-map is a coarse 9 x 9 grid. It is scaled up to a copy of
+        # the X-ray that is at most 1200 px on its longer side, which keeps
+        # the response small.
         display_image = original_image.copy()
         display_image.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
         raw_heatmap = generate_raw_heatmap(
@@ -163,6 +241,8 @@ def explain():
         )
         overlay = overlay_heatmap(display_image, gradcam_result.heatmap)
 
+        # Diagnostics go to the server log (and to the "debug" field below)
+        # so a heat-map can be traced back to the exact model output.
         app.logger.info(
             "Grad-CAM diagnostics: predicted_class=%s raw_model_output=%.8f "
             "confidence=%.4f target_class=%s target_index=%s target_logit=%.8f layer=%s "
@@ -198,10 +278,8 @@ def explain():
             }
         })
 
-    except (UnidentifiedImageError, OSError, ValueError):
-        return jsonify({
-            'error': 'The uploaded file is not a valid image. Please try a PNG or JPEG X-ray.'
-        }), 400
+    except InvalidImageError as error:
+        return jsonify({'error': str(error)}), 400
 
     except Exception:
         app.logger.exception("Grad-CAM generation failed")
@@ -212,6 +290,12 @@ def explain():
 
 @app.route('/report', methods=['POST'])
 def report():
+    """Build a one-page PDF report for the uploaded X-ray and send it as a download.
+
+    The report shows the prediction, the model score, the X-ray, the raw
+    Grad-CAM map and the overlay, and a research-use disclaimer. It is built
+    entirely in memory.
+    """
     if model is None:
         return jsonify({'error': 'The prediction model is unavailable.'}), 503
 
@@ -228,21 +312,26 @@ def report():
         original_image, image_array = _read_uploaded_image(file)
         result = gradcam_explainer.generate(image_array)
 
+        # The resized copy (not the full-size upload) goes into the PDF so the
+        # report stays small even for very large X-rays.
         display_image = original_image.copy()
         display_image.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
         raw_heatmap = generate_raw_heatmap(result.heatmap, display_image.size)
         overlay = overlay_heatmap(display_image, result.heatmap)
 
+        # ReportLab reads images from file-like objects, so each image is
+        # saved as PNG into an in-memory buffer.
         original_buffer = BytesIO()
         heatmap_buffer = BytesIO()
         overlay_buffer = BytesIO()
-        original_image.save(original_buffer, format='PNG')
+        display_image.save(original_buffer, format='PNG')
         raw_heatmap.save(heatmap_buffer, format='PNG')
         overlay.save(overlay_buffer, format='PNG')
         original_buffer.seek(0)
         heatmap_buffer.seek(0)
         overlay_buffer.seek(0)
 
+        # Page layout and text styles for the report.
         pdf_buffer = BytesIO()
         document = SimpleDocTemplate(
             pdf_buffer,
@@ -287,6 +376,8 @@ def report():
             leading=11,
         ))
 
+        # The "story" is ReportLab's ordered list of page elements: title,
+        # summary table, image row, explanation and disclaimer.
         score = result.confidence * 100
         story = [
             Paragraph('Chest X-ray Model Analysis', styles['ReportTitle']),
@@ -297,6 +388,7 @@ def report():
             Spacer(1, 14),
         ]
 
+        # Summary row: predicted class, score and the class Grad-CAM explains.
         summary = Table(
             [
                 ['MODEL PREDICTION', 'MODEL SCORE', 'EXPLAINED CLASS'],
@@ -332,6 +424,8 @@ def report():
             Spacer(1, 16),
         ])
 
+        # Three images side by side with captions underneath. kind='proportional'
+        # fits each image inside the box without stretching it.
         image_width = 170
         image_height = 190
         images = [
@@ -378,6 +472,7 @@ def report():
         document.build(story)
         pdf_buffer.seek(0)
 
+        # as_attachment makes the browser download the file instead of opening it.
         return send_file(
             pdf_buffer,
             mimetype='application/pdf',
@@ -385,10 +480,8 @@ def report():
             download_name='chest-xray-analysis-report.pdf',
         )
 
-    except (UnidentifiedImageError, OSError, ValueError):
-        return jsonify({
-            'error': 'The uploaded file is not a valid image. Please try a PNG or JPEG X-ray.'
-        }), 400
+    except InvalidImageError as error:
+        return jsonify({'error': str(error)}), 400
 
     except Exception:
         app.logger.exception("PDF report generation failed")
@@ -398,4 +491,5 @@ def report():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    # The Werkzeug debugger allows running code, so it is opt-in: FLASK_DEBUG=1.
+    app.run(debug=os.environ.get('FLASK_DEBUG') == '1', port=5000)
