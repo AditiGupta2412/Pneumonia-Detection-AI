@@ -1,4 +1,12 @@
-"""Run genuine Grad-CAM on an X-ray and save the raw CAM and overlay."""
+"""Run genuine Grad-CAM on an X-ray and save the raw CAM and overlay.
+
+Unlike the automated tests in tests/, this script uses the real SavedModel.
+It checks that the Grad-CAM model reproduces the SavedModel's prediction,
+saves the original, raw Grad-CAM and overlay images, prints diagnostics, and
+confirms that the model files were not modified.
+
+Usage: python test_gradcam.py --image path/to/xray.jpg
+"""
 
 from __future__ import annotations
 
@@ -22,6 +30,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 
 
 def _model_hashes(model_dir: Path) -> dict[str, str]:
+    """Return a SHA-256 hash of every file in the model folder, read in 1 MB chunks."""
     hashes = {}
     for path in sorted(path for path in model_dir.rglob("*") if path.is_file()):
         hasher = hashlib.sha256()
@@ -51,6 +60,8 @@ def main() -> None:
     if not image_path.is_file():
         parser.error(f"X-ray image does not exist: {image_path}")
 
+    # Hash the model files first so the end of the script can prove that
+    # explaining a prediction did not change them.
     before_hashes = _model_hashes(model_dir)
     saved_model = tf.saved_model.load(str(model_dir))
     signature = saved_model.signatures.get("serving_default")
@@ -61,6 +72,7 @@ def main() -> None:
         original = normalize_to_rgb(source)
     batch = preprocess_image(original)
 
+    # Reference prediction straight from the SavedModel, as app.py makes it.
     input_name = next(iter(signature.structured_input_signature[1]))
     reference_result = signature(**{input_name: tf.constant(batch)})
     reference_output = next(iter(reference_result.values()))
@@ -73,6 +85,7 @@ def main() -> None:
         raise RuntimeError(f"Sigmoid output is outside [0, 1]: {raw_output}.")
     reference_class = "PNEUMONIA" if raw_output > 0.5 else "NORMAL"
 
+    # The Grad-CAM model must give the same score and class as the reference.
     explainer = GradCAMExplainer(saved_model)
     result = explainer.generate(batch)
     if not np.isclose(raw_output, result.pneumonia_probability, rtol=1e-4, atol=1e-5):
@@ -80,6 +93,7 @@ def main() -> None:
     if result.predicted_class != reference_class:
         raise AssertionError("Grad-CAM target class differs from model prediction.")
 
+    # Save the three images at the X-ray's original size.
     output_dir.mkdir(parents=True, exist_ok=True)
     raw_heatmap = generate_raw_heatmap(result.heatmap, original.size)
     overlay = overlay_heatmap(original, result.heatmap)
